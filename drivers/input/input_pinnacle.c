@@ -876,7 +876,7 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .z_threshold_release = DT_INST_PROP_OR(n, z_threshold_release, 2),                         \
         .sensitivity = DT_INST_ENUM_IDX_OR(n, sensitivity, PINNACLE_SENSITIVITY_1X),               \
         .dr = GPIO_DT_SPEC_GET_OR(DT_DRV_INST(n), dr_gpios, {}),                                   \
-        .inertia_enable = DT_INST_PROP_OR(n, inertia_enable, false),                               \
+        .inertia_enable = DT_INST_PROP_OR(n, inertia, false),                                     \
         .inertia_start_velocity = DT_INST_PROP_OR(n, inertia_start_velocity, 15),                  \
         .inertia_stop_velocity = DT_INST_PROP_OR(n, inertia_stop_velocity, 5),                     \
         .inertia_decay_rate = DT_INST_PROP_OR(n, inertia_decay_rate, 950),                         \

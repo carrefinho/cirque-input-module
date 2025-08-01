@@ -39,7 +39,7 @@ properties:
     type: int
     default: 2
     description: Maximum Z-level for touch release detection
-  inertia-enable:
+  inertia:
     type: boolean
     description: Enable pointer inertia feature
   inertia-start-velocity:
