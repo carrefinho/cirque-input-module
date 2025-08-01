@@ -72,6 +72,13 @@
 #define PINNACLE_PACKET0_X_SIGN BIT(4)   // X delta sign
 #define PINNACLE_PACKET0_Y_SIGN BIT(5)   // Y delta sign
 
+struct pinnacle_inertia_axis {
+    int32_t velocity_x1000;     // Velocity scaled by 1000 for precision
+    int64_t last_event_time;    // Last time this axis had movement
+    bool active;                // Whether this axis has active inertia
+    int32_t remainder_x1000;    // Sub-pixel remainder for smooth movement
+};
+
 struct pinnacle_data {
     uint8_t btn_cache;
     bool in_int;
@@ -81,6 +88,10 @@ struct pinnacle_data {
     const struct device *dev;
     struct gpio_callback gpio_cb;
     struct k_work work;
+    // Inertia state
+    struct pinnacle_inertia_axis inertia_x, inertia_y;
+    struct k_work_delayable inertia_work;
+    struct k_mutex inertia_lock;
 };
 
 enum pinnacle_sensitivity {
@@ -108,6 +119,12 @@ struct pinnacle_config {
     uint8_t x_axis_z_min, y_axis_z_min;
     uint8_t z_threshold_touch, z_threshold_release;
     const struct gpio_dt_spec dr;
+    // Inertia configuration
+    bool inertia_enable;
+    uint16_t inertia_start_velocity;
+    uint16_t inertia_stop_velocity;
+    uint16_t inertia_decay_rate;
+    uint16_t inertia_update_interval_ms;
 };
 
 int pinnacle_set_sleep(const struct device *dev, bool enabled);
