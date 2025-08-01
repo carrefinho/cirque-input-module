@@ -92,7 +92,6 @@ struct pinnacle_data {
     struct pinnacle_inertia_axis inertia_x, inertia_y;
     struct k_work_delayable inertia_work;
     struct k_mutex inertia_lock;
-    bool finger_lifted;       // True when finger is off trackpad, reset on first touch
 };
 
 enum pinnacle_sensitivity {

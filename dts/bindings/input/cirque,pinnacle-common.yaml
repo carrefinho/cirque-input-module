@@ -44,15 +44,15 @@ properties:
     description: Enable pointer inertia feature
   inertia-start-velocity:
     type: int
-    default: 15
+    default: 300
     description: Minimum velocity to start inertia on finger lift (scaled by 1000)
   inertia-stop-velocity:
     type: int
-    default: 5
+    default: 20
     description: Minimum velocity to continue inertia (scaled by 1000)
   inertia-decay-rate:
     type: int
-    default: 950
+    default: 980
     description: Velocity decay rate per update (0-1000, higher = slower decay)
   inertia-update-interval-ms:
     type: int

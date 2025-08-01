@@ -306,13 +306,12 @@ static void pinnacle_report_data(const struct device *dev) {
     }
 
     // Check if this is the first touch after finger was lifted
-    if (data->finger_lifted && z_level >= config->z_threshold_touch) {
+    if (!data->touch_active && z_level >= config->z_threshold_touch) {
         LOG_DBG("First touch after lift at (%d,%d) - setting as new origin", abs_x, abs_y);
         // Set new origin without sending any movement
         data->last_x = abs_x;
         data->last_y = abs_y;
         data->position_valid = true;
-        data->finger_lifted = false;
         goto handle_touch_detection;  // Handle touch state but skip movement calculation
     }
 
@@ -440,7 +439,6 @@ handle_touch_detection:
         } else if (release_touch && data->touch_active) {
             // Touch up - potentially start inertia
             data->touch_active = false;
-            data->finger_lifted = true;  // Mark that finger is now off trackpad
             LOG_DBG("Touch up (Z=%d)", z_level);
 
             if (config->inertia_enable) {
@@ -708,7 +706,6 @@ static int pinnacle_init(const struct device *dev) {
     data->position_valid = false;
     data->last_x = 0;
     data->last_y = 0;
-    data->finger_lifted = false;
 
     // Initialize inertia system
     if (config->inertia_enable) {
