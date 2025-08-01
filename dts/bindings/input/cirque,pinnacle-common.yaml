@@ -28,4 +28,34 @@ properties:
   y-axis-z-min:
     type: int
     default: 4
+  z-touch-detection:
+    type: boolean
+    description: Enable Z-level based touch detection
+  z-threshold-touch:
+    type: int
+    default: 5
+    description: Minimum Z-level for touch detection
+  z-threshold-release:
+    type: int
+    default: 2
+    description: Maximum Z-level for touch release detection
+  inertia:
+    type: boolean
+    description: Enable pointer inertia feature
+  inertia-start-velocity:
+    type: int
+    default: 300
+    description: Minimum velocity to start inertia on finger lift (scaled by 1000)
+  inertia-stop-velocity:
+    type: int
+    default: 20
+    description: Minimum velocity to continue inertia (scaled by 1000)
+  inertia-decay-rate:
+    type: int
+    default: 980
+    description: Velocity decay rate per update (0-1000, higher = slower decay)
+  inertia-update-interval-ms:
+    type: int
+    default: 5
+    description: Timer interval for synthetic movement events during inertia (ms)
 
