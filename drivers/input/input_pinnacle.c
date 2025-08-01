@@ -4,6 +4,7 @@
 #include <zephyr/init.h>
 #include <zephyr/input/input.h>
 #include <zephyr/pm/device.h>
+#include <stdlib.h>
 
 #include <zephyr/logging/log.h>
 
@@ -231,7 +232,7 @@ static int pinnacle_era_write(const struct device *dev, const uint16_t addr, uin
 
 static void pinnacle_report_data(const struct device *dev) {
     const struct pinnacle_config *config = dev->config;
-    uint8_t packet[3];
+    uint8_t packet[6]; // 6-byte absolute packet
     int ret;
     ret = pinnacle_seq_read(dev, PINNACLE_STATUS1, packet, 1);
     if (ret < 0) {
@@ -245,27 +246,31 @@ static void pinnacle_report_data(const struct device *dev) {
     if (packet[0] == 0xFF || !(packet[0] & PINNACLE_STATUS1_SW_DR)) {
         return;
     }
-    ret = pinnacle_seq_read(dev, PINNACLE_2_2_PACKET0, packet, 3);
+
+    // Read 6-byte absolute packet: 0x12-0x17 for Pinnacle 2.2
+    ret = pinnacle_seq_read(dev, 0x12, packet, 6);
     if (ret < 0) {
         LOG_ERR("read packet: %d", ret);
         return;
     }
 
-    LOG_HEXDUMP_DBG(packet, 3, "Pinnacle Packets");
+    LOG_HEXDUMP_DBG(packet, 6, "Pinnacle Absolute Packets");
 
     struct pinnacle_data *data = dev->data;
-    uint8_t btn = packet[0] &
-                  (PINNACLE_PACKET0_BTN_PRIM | PINNACLE_PACKET0_BTN_SEC | PINNACLE_PACKET0_BTN_AUX);
 
-    int8_t dx = (int8_t)packet[1];
-    int8_t dy = (int8_t)packet[2];
+    // Extract button data from packet[0] (register 0x12)
+    uint8_t btn = packet[0] & 0x3F; // Lower 6 bits for buttons (SW0-SW5)
 
-    if (packet[0] & PINNACLE_PACKET0_X_SIGN) {
-        WRITE_BIT(dx, 7, 1);
-    }
-    if (packet[0] & PINNACLE_PACKET0_Y_SIGN) {
-        WRITE_BIT(dy, 7, 1);
-    }
+    // Extract absolute X/Y position according to datasheet Table 8
+    // X: packet[2] (0x14 - X Position Low Byte) + lower nibble of packet[4] (0x16 - X11-X8)
+    // Y: packet[3] (0x15 - Y Position Low Byte) + upper nibble of packet[4] (0x16 - Y11-Y8)
+    uint16_t abs_x =
+        packet[2] | ((packet[4] & 0x0F) << 8); // X = packet[2] + low 4 bits of packet[4]
+    uint16_t abs_y =
+        packet[3] | (((packet[4] & 0xF0) >> 4) << 8); // Y = packet[3] + high 4 bits of packet[4]
+
+    // Extract Z-level from packet[5] (register 0x17)
+    uint8_t z_level = packet[5] & 0x3F; // Z-level is 6-bit value
 
     if (data->in_int) {
         LOG_DBG("Clearing status bit");
@@ -284,8 +289,91 @@ static void pinnacle_report_data(const struct device *dev) {
 
     data->btn_cache = btn;
 
-    input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
-    input_report_rel(dev, INPUT_REL_Y, dy, true, K_FOREVER);
+    LOG_DBG("Absolute position: X=%d, Y=%d, Z=%d", abs_x, abs_y, z_level);
+
+    // Validate coordinates are in expected range (12-bit: 0-4095)
+    if (abs_x > 4095 || abs_y > 4095) {
+        LOG_WRN("Invalid coordinates: X=%d, Y=%d - ignoring", abs_x, abs_y);
+        return;
+    }
+
+    // Calculate relative movement deltas from absolute positions
+    int16_t dx = 0, dy = 0;
+    if (data->position_valid) {
+        // Calculate deltas from previous position
+        int32_t raw_dx = (int32_t)abs_x - (int32_t)data->last_x;
+        int32_t raw_dy = (int32_t)abs_y - (int32_t)data->last_y;
+
+        // Filter out large jumps that indicate position errors or palm detection
+        const int32_t MAX_JUMP = 500; // Adjust based on testing
+        if (abs(raw_dx) > MAX_JUMP || abs(raw_dy) > MAX_JUMP) {
+            LOG_WRN("Large position jump detected: dx=%d, dy=%d - ignoring", (int)raw_dx,
+                    (int)raw_dy);
+            // Update position but don't report movement
+            data->last_x = abs_x;
+            data->last_y = abs_y;
+            return;
+        }
+
+        // Use raw deltas without scaling for more responsive tracking
+        dx = (int16_t)raw_dx;
+        dy = (int16_t)raw_dy;
+
+        // Add deadzone to prevent jitter from small movements
+        const int16_t DEADZONE = 1;
+        if (abs(dx) < DEADZONE)
+            dx = 0;
+        if (abs(dy) < DEADZONE)
+            dy = 0;
+
+        LOG_DBG("Raw delta: dx=%d, dy=%d, Scaled delta: dx=%d, dy=%d", (int)raw_dx, (int)raw_dy, dx,
+                dy);
+
+        // Only report movement if there's actual movement
+        if (dx != 0 || dy != 0) {
+            input_report_rel(dev, INPUT_REL_X, dx, false, K_FOREVER);
+            input_report_rel(dev, INPUT_REL_Y, dy, false, K_FOREVER);
+        }
+    } else {
+        // First valid position - no movement to report yet
+        data->position_valid = true;
+        LOG_DBG("First valid position recorded");
+    }
+
+    // Update previous position for next delta calculation
+    data->last_x = abs_x;
+    data->last_y = abs_y;
+
+    // Z-level touch detection (if enabled)
+    if (config->z_touch_detection) {
+        LOG_DBG("Z-level: %d, touch_thresh: %d, release_thresh: %d", z_level,
+                config->z_threshold_touch, config->z_threshold_release);
+
+        // Determine touch state based on Z-level thresholds
+        bool current_touch = z_level >= config->z_threshold_touch;
+        bool release_touch = z_level < config->z_threshold_release;
+
+        // Apply hysteresis to prevent jitter
+        if (current_touch && !data->touch_active) {
+            // Touch down
+            data->touch_active = true;
+            input_report_key(dev, INPUT_BTN_TOUCH, 1, false, K_FOREVER);
+            LOG_DBG("Touch down (Z=%d)", z_level);
+        } else if (release_touch && data->touch_active) {
+            // Touch up
+            data->touch_active = false;
+            input_report_key(dev, INPUT_BTN_TOUCH, 0, false, K_FOREVER);
+            LOG_DBG("Touch up (Z=%d)", z_level);
+        }
+    }
+
+    // Send sync event (only report touch events if touch detection is enabled)
+    if (config->z_touch_detection) {
+        input_report_key(dev, INPUT_BTN_TOUCH, data->touch_active ? 1 : 0, true, K_FOREVER);
+    } else {
+        // Send sync without touch events when touch detection is disabled
+        input_report_rel(dev, INPUT_REL_X, 0, true, K_FOREVER);
+    }
 
     return;
 }
@@ -325,7 +413,7 @@ static int pinnacle_tune_edge_sensitivity(const struct device *dev) {
     uint8_t x_val;
     ret = pinnacle_era_read(dev, PINNACLE_ERA_REG_X_AXIS_WIDE_Z_MIN, &x_val);
     if (ret < 0) {
-        LOG_WRN("Failed to read X val");
+        LOG_WRN("Failed to read X val: %d", ret);
         return ret;
     }
 
@@ -334,7 +422,7 @@ static int pinnacle_tune_edge_sensitivity(const struct device *dev) {
     uint8_t y_val;
     ret = pinnacle_era_read(dev, PINNACLE_ERA_REG_Y_AXIS_WIDE_Z_MIN, &y_val);
     if (ret < 0) {
-        LOG_WRN("Failed to read Y val");
+        LOG_WRN("Failed to read Y val: %d", ret);
         return ret;
     }
 
@@ -434,7 +522,15 @@ static int pinnacle_init(const struct device *dev) {
 
     LOG_DBG("Found device with FW ID: 0x%02x, Version: 0x%02x", fw_id[0], fw_id[1]);
 
+    LOG_INF("Z-touch detection: %s, thresholds: touch=%d, release=%d",
+            config->z_touch_detection ? "enabled" : "disabled", config->z_threshold_touch,
+            config->z_threshold_release);
+
     data->in_int = false;
+    data->touch_active = false;
+    data->position_valid = false;
+    data->last_x = 0;
+    data->last_y = 0;
     k_msleep(10);
     ret = pinnacle_write(dev, PINNACLE_STATUS1, 0); // Clear CC
     if (ret < 0) {
@@ -507,7 +603,8 @@ static int pinnacle_init(const struct device *dev) {
         LOG_ERR("can't write %d", ret);
         return ret;
     }
-    uint8_t feed_cfg1 = PINNACLE_FEED_CFG1_EN_FEED;
+    uint8_t feed_cfg1 =
+        PINNACLE_FEED_CFG1_EN_FEED | PINNACLE_FEED_CFG1_ABS_MODE; // Enable absolute mode
     if (config->x_invert) {
         feed_cfg1 |= PINNACLE_FEED_CFG1_INV_X;
     }
@@ -576,8 +673,11 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .sleep_en = DT_INST_PROP(n, sleep),                                                        \
         .no_taps = DT_INST_PROP(n, no_taps),                                                       \
         .no_secondary_tap = DT_INST_PROP(n, no_secondary_tap),                                     \
+        .z_touch_detection = DT_INST_PROP_OR(n, z_touch_detection, false),                         \
         .x_axis_z_min = DT_INST_PROP_OR(n, x_axis_z_min, 5),                                       \
         .y_axis_z_min = DT_INST_PROP_OR(n, y_axis_z_min, 4),                                       \
+        .z_threshold_touch = DT_INST_PROP_OR(n, z_threshold_touch, 5),                             \
+        .z_threshold_release = DT_INST_PROP_OR(n, z_threshold_release, 2),                         \
         .sensitivity = DT_INST_ENUM_IDX_OR(n, sensitivity, PINNACLE_SENSITIVITY_1X),               \
         .dr = GPIO_DT_SPEC_GET_OR(DT_DRV_INST(n), dr_gpios, {}),                                   \
     };                                                                                             \

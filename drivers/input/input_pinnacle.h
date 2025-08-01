@@ -75,6 +75,9 @@
 struct pinnacle_data {
     uint8_t btn_cache;
     bool in_int;
+    bool touch_active;
+    uint16_t last_x, last_y;  // Previous absolute position for delta calculation
+    bool position_valid;      // Whether we have a valid previous position
     const struct device *dev;
     struct gpio_callback gpio_cb;
     struct k_work work;
@@ -100,9 +103,10 @@ struct pinnacle_config {
     pinnacle_seq_read_t seq_read;
     pinnacle_write_t write;
 
-    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert;
+    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, z_touch_detection;
     enum pinnacle_sensitivity sensitivity;
     uint8_t x_axis_z_min, y_axis_z_min;
+    uint8_t z_threshold_touch, z_threshold_release;
     const struct gpio_dt_spec dr;
 };
 

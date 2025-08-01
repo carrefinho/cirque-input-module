@@ -28,4 +28,15 @@ properties:
   y-axis-z-min:
     type: int
     default: 4
+  z-touch-detection:
+    type: boolean
+    description: Enable Z-level based touch detection
+  z-threshold-touch:
+    type: int
+    default: 5
+    description: Minimum Z-level for touch detection
+  z-threshold-release:
+    type: int
+    default: 2
+    description: Maximum Z-level for touch release detection
 
