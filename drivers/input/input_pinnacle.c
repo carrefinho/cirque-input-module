@@ -297,6 +297,25 @@ static void pinnacle_report_data(const struct device *dev) {
         return;
     }
 
+    // Check for "no valid position" condition - trackpad reports (0,0) with Z=0 during finger lift
+    bool position_invalid = (abs_x == 0 && abs_y == 0 && z_level == 0);
+    if (position_invalid) {
+        LOG_DBG("No valid position detected (0,0 + Z=0) - skipping position update");
+        // Skip movement calculation and position updates, but still handle touch state for inertia
+        goto handle_touch_detection;
+    }
+
+    // Check if this is the first touch after finger was lifted
+    if (data->finger_lifted && z_level >= config->z_threshold_touch) {
+        LOG_DBG("First touch after lift at (%d,%d) - setting as new origin", abs_x, abs_y);
+        // Set new origin without sending any movement
+        data->last_x = abs_x;
+        data->last_y = abs_y;
+        data->position_valid = true;
+        data->finger_lifted = false;
+        goto handle_touch_detection;  // Handle touch state but skip movement calculation
+    }
+
     // Calculate relative movement deltas from absolute positions
     int16_t dx = 0, dy = 0;
     if (data->position_valid) {
@@ -328,6 +347,8 @@ static void pinnacle_report_data(const struct device *dev) {
 
         LOG_DBG("Raw delta: dx=%d, dy=%d, Scaled delta: dx=%d, dy=%d", (int)raw_dx, (int)raw_dy, dx,
                 dy);
+        LOG_DBG("Delta calculation: (%d,%d) - (%d,%d) = (%d,%d)",
+                abs_x, abs_y, data->last_x, data->last_y, dx, dy);
 
         // Only report movement if there's actual movement
         if (dx != 0 || dy != 0) {
@@ -337,35 +358,35 @@ static void pinnacle_report_data(const struct device *dev) {
             // Update inertia velocities if inertia is enabled
             if (config->inertia_enable) {
                 k_mutex_lock(&data->inertia_lock, K_FOREVER);
-                
+
                 int64_t current_time = k_uptime_get();
-                
+
                 // Update X velocity
                 if (dx != 0) {
                     if (data->inertia_x.last_event_time > 0) {
                         int64_t time_diff_ms = current_time - data->inertia_x.last_event_time;
                         if (time_diff_ms <= 0) time_diff_ms = 1;
-                        
+
                         int32_t new_velocity = (dx * 1000) / time_diff_ms;
                         // Apply smoothing - weighted average with previous velocity
                         data->inertia_x.velocity_x1000 = (data->inertia_x.velocity_x1000 * 7 + new_velocity * 3) / 10;
                     }
                     data->inertia_x.last_event_time = current_time;
                 }
-                
+
                 // Update Y velocity
                 if (dy != 0) {
                     if (data->inertia_y.last_event_time > 0) {
                         int64_t time_diff_ms = current_time - data->inertia_y.last_event_time;
                         if (time_diff_ms <= 0) time_diff_ms = 1;
-                        
+
                         int32_t new_velocity = (dy * 1000) / time_diff_ms;
                         // Apply smoothing - weighted average with previous velocity
                         data->inertia_y.velocity_x1000 = (data->inertia_y.velocity_x1000 * 7 + new_velocity * 3) / 10;
                     }
                     data->inertia_y.last_event_time = current_time;
                 }
-                
+
                 // Clear velocities for axes that haven't moved recently (>50ms)
                 if (dx == 0 && data->inertia_x.last_event_time > 0 && (current_time - data->inertia_x.last_event_time) > 50) {
                     data->inertia_x.velocity_x1000 = 0;
@@ -373,7 +394,7 @@ static void pinnacle_report_data(const struct device *dev) {
                 if (dy == 0 && data->inertia_y.last_event_time > 0 && (current_time - data->inertia_y.last_event_time) > 50) {
                     data->inertia_y.velocity_x1000 = 0;
                 }
-                
+
                 k_mutex_unlock(&data->inertia_lock);
             }
         }
@@ -387,6 +408,7 @@ static void pinnacle_report_data(const struct device *dev) {
     data->last_x = abs_x;
     data->last_y = abs_y;
 
+handle_touch_detection:
     // Z-level touch detection (if enabled)
     if (config->z_touch_detection) {
         LOG_DBG("Z-level: %d, touch_thresh: %d, release_thresh: %d", z_level,
@@ -401,7 +423,7 @@ static void pinnacle_report_data(const struct device *dev) {
             // Touch down - stop inertia immediately
             data->touch_active = true;
             LOG_DBG("Touch down (Z=%d)", z_level);
-            
+
             if (config->inertia_enable) {
                 k_mutex_lock(&data->inertia_lock, K_FOREVER);
                 // Stop inertia and clear all state
@@ -418,12 +440,13 @@ static void pinnacle_report_data(const struct device *dev) {
         } else if (release_touch && data->touch_active) {
             // Touch up - potentially start inertia
             data->touch_active = false;
+            data->finger_lifted = true;  // Mark that finger is now off trackpad
             LOG_DBG("Touch up (Z=%d)", z_level);
-            
+
             if (config->inertia_enable) {
                 k_mutex_lock(&data->inertia_lock, K_FOREVER);
                 bool start_inertia = false;
-                
+
                 // Check if X velocity is sufficient for inertia
                 int32_t abs_vel_x = data->inertia_x.velocity_x1000 < 0 ? -data->inertia_x.velocity_x1000 : data->inertia_x.velocity_x1000;
                 if (abs_vel_x >= config->inertia_start_velocity) {
@@ -431,7 +454,7 @@ static void pinnacle_report_data(const struct device *dev) {
                     start_inertia = true;
                     LOG_DBG("X axis inertia started with velocity %d", data->inertia_x.velocity_x1000);
                 }
-                
+
                 // Check if Y velocity is sufficient for inertia
                 int32_t abs_vel_y = data->inertia_y.velocity_x1000 < 0 ? -data->inertia_y.velocity_x1000 : data->inertia_y.velocity_x1000;
                 if (abs_vel_y >= config->inertia_start_velocity) {
@@ -439,13 +462,13 @@ static void pinnacle_report_data(const struct device *dev) {
                     start_inertia = true;
                     LOG_DBG("Y axis inertia started with velocity %d", data->inertia_y.velocity_x1000);
                 }
-                
+
                 // Start inertia timer if any axis is active
                 if (start_inertia && !k_work_delayable_is_pending(&data->inertia_work)) {
                     k_work_reschedule(&data->inertia_work, K_MSEC(config->inertia_update_interval_ms));
                     LOG_DBG("Inertia timer started");
                 }
-                
+
                 k_mutex_unlock(&data->inertia_lock);
             }
         }
@@ -519,6 +542,7 @@ static void pinnacle_inertia_work_cb(struct k_work *work) {
     // Send synthetic movement events if we have any movement
     if (synthetic_dx != 0 || synthetic_dy != 0) {
         LOG_DBG("Inertia synthetic movement: dx=%d, dy=%d", synthetic_dx, synthetic_dy);
+
         if (synthetic_dx != 0) {
             input_report_rel(data->dev, INPUT_REL_X, synthetic_dx, false, K_FOREVER);
         }
@@ -684,23 +708,24 @@ static int pinnacle_init(const struct device *dev) {
     data->position_valid = false;
     data->last_x = 0;
     data->last_y = 0;
+    data->finger_lifted = false;
 
     // Initialize inertia system
     if (config->inertia_enable) {
         k_mutex_init(&data->inertia_lock);
         k_work_init_delayable(&data->inertia_work, pinnacle_inertia_work_cb);
-        
+
         // Initialize inertia axis states
         data->inertia_x.velocity_x1000 = 0;
         data->inertia_x.last_event_time = 0;
         data->inertia_x.active = false;
         data->inertia_x.remainder_x1000 = 0;
-        
+
         data->inertia_y.velocity_x1000 = 0;
         data->inertia_y.last_event_time = 0;
         data->inertia_y.active = false;
         data->inertia_y.remainder_x1000 = 0;
-        
+
         LOG_DBG("Inertia system initialized: start_vel=%d, stop_vel=%d, decay=%d, interval=%dms",
                 config->inertia_start_velocity, config->inertia_stop_velocity,
                 config->inertia_decay_rate, config->inertia_update_interval_ms);
