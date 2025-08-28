@@ -1,4 +1,6 @@
-This is a fork of [petejohanson/cirque-input-module](https://github.com/petejohanson/cirque-input-module) with added cursor inertia/trackball simulation functionality.
+This is a fork of [petejohanson/cirque-input-module](https://github.com/petejohanson/cirque-input-module) with added cursor inertia/trackball simulation functionality. Tap detection is handled in software by the driver.
+
+This is an experimental implementation and may have some jank.
 
 ## Usage
 
@@ -18,7 +20,6 @@ Configure the Cirque trackpad in devicetree like so:
 
       sensitivity = "2x";
       sleep;
-      no-taps;
 
       z-touch-detection;
       z-threshold-touch = <5>;

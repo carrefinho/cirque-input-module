@@ -10,10 +10,6 @@ properties:
     type: boolean
   sleep:
     type: boolean
-  no-secondary-tap:
-    type: boolean
-  no-taps:
-    type: boolean
   sensitivity:
     type: string
     enum:
@@ -58,4 +54,15 @@ properties:
     type: int
     default: 5
     description: Timer interval for synthetic movement events during inertia (ms)
+  no-taps:
+    type: boolean
+    description: Disable synthetic tap detection
+  tap-timeout-ms:
+    type: int
+    default: 200
+    description: Maximum tap duration in milliseconds
+  tap-movement-threshold:
+    type: int
+    default: 15
+    description: Maximum movement in pixels for valid tap
 

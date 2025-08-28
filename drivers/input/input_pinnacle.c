@@ -230,6 +230,74 @@ static int pinnacle_era_write(const struct device *dev, const uint16_t addr, uin
     return ret;
 }
 
+static uint16_t calculate_distance(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2) {
+    int32_t dx = (int32_t)x1 - (int32_t)x2;
+    int32_t dy = (int32_t)y1 - (int32_t)y2;
+    // Simple Manhattan distance for efficiency
+    return abs(dx) + abs(dy);
+}
+
+static void pinnacle_tap_release_work_handler(struct k_work *work) {
+    struct k_work_delayable *delayable_work = k_work_delayable_from_work(work);
+    struct pinnacle_data *data = CONTAINER_OF(delayable_work, struct pinnacle_data, tap_release_work);
+    
+    // Generate button release
+    input_report_key(data->dev, INPUT_BTN_0, 0, false, K_FOREVER);
+    LOG_DBG("Synthetic button release generated");
+}
+
+static void pinnacle_process_tap_detection(const struct device *dev, uint16_t x, uint16_t y, uint8_t z_level) {
+    const struct pinnacle_config *config = dev->config;
+    struct pinnacle_data *data = dev->data;
+    struct pinnacle_tap_detector *tap = &data->tap_detector;
+    
+    if (config->no_taps) {
+        return;
+    }
+    
+    int64_t current_time = k_uptime_get();
+    bool touch_detected = z_level >= config->z_threshold_touch;
+    bool touch_released = z_level < config->z_threshold_release;
+    
+    switch (tap->state) {
+    case TAP_IDLE:
+        if (touch_detected) {
+            // Touch down - start potential tap
+            tap->state = TAP_DOWN;
+            tap->touch_start_time = current_time;
+            tap->initial_x = x;
+            tap->initial_y = y;
+            tap->max_movement = 0;
+            LOG_DBG("Touch down at (%d,%d)", x, y);
+        }
+        break;
+        
+    case TAP_DOWN:
+        if (touch_detected) {
+            // Update movement tracking
+            uint16_t movement = calculate_distance(x, y, tap->initial_x, tap->initial_y);
+            if (movement > tap->max_movement) {
+                tap->max_movement = movement;
+            }
+        } else if (touch_released) {
+            // Touch up - check if it was a valid tap
+            int64_t touch_duration = current_time - tap->touch_start_time;
+            
+            if (touch_duration <= config->tap_timeout_ms && 
+                tap->max_movement <= config->tap_movement_threshold) {
+                // Valid tap - mark for button event generation
+                tap->tap_pending = true;
+                LOG_DBG("Tap detected: duration=%lldms, movement=%d", touch_duration, tap->max_movement);
+            } else {
+                // Invalid tap (too long or too much movement)
+                LOG_DBG("Invalid tap: duration=%lldms, movement=%d", touch_duration, tap->max_movement);
+            }
+            tap->state = TAP_IDLE;
+        }
+        break;
+    }
+}
+
 static void pinnacle_report_data(const struct device *dev) {
     const struct pinnacle_config *config = dev->config;
     uint8_t packet[6]; // 6-byte absolute packet
@@ -258,8 +326,8 @@ static void pinnacle_report_data(const struct device *dev) {
 
     struct pinnacle_data *data = dev->data;
 
-    // Extract button data from packet[0] (register 0x12)
-    uint8_t btn = packet[0] & 0x3F; // Lower 6 bits for buttons (SW0-SW5)
+    // Note: In absolute mode, packet[0] contains physical button states only
+    // Tap detection will be implemented synthetically below
 
     // Extract absolute X/Y position according to datasheet Table 8
     // X: packet[2] (0x14 - X Position Low Byte) + lower nibble of packet[4] (0x16 - X11-X8)
@@ -278,16 +346,23 @@ static void pinnacle_report_data(const struct device *dev) {
         data->in_int = true;
     }
 
-    if (!config->no_taps && (btn || data->btn_cache)) {
-        for (int i = 0; i < 3; i++) {
-            uint8_t btn_val = btn & BIT(i);
-            if (btn_val != (data->btn_cache & BIT(i))) {
-                input_report_key(dev, INPUT_BTN_0 + i, btn_val ? 1 : 0, false, K_FOREVER);
-            }
+    // Process tap detection using position and Z-level data
+    pinnacle_process_tap_detection(dev, abs_x, abs_y, z_level);
+    
+    // Handle synthetic button events from tap detection
+    if (!config->no_taps) {
+        // Check if we have a pending tap to generate a button click
+        if (data->tap_detector.tap_pending) {
+            // Generate immediate button press
+            input_report_key(dev, INPUT_BTN_0, 1, false, K_FOREVER);
+            LOG_DBG("Synthetic button press generated");
+            
+            // Schedule button release after a short delay (10ms)
+            k_work_schedule(&data->tap_release_work, K_MSEC(10));
+            
+            data->tap_detector.tap_pending = false;
         }
     }
-
-    data->btn_cache = btn;
 
     LOG_DBG("Absolute position: X=%d, Y=%d, Z=%d", abs_x, abs_y, z_level);
 
@@ -727,6 +802,22 @@ static int pinnacle_init(const struct device *dev) {
                 config->inertia_start_velocity, config->inertia_stop_velocity,
                 config->inertia_decay_rate, config->inertia_update_interval_ms);
     }
+    
+    // Initialize tap detection system
+    if (!config->no_taps) {
+        data->tap_detector.state = TAP_IDLE;
+        data->tap_detector.touch_start_time = 0;
+        data->tap_detector.initial_x = 0;
+        data->tap_detector.initial_y = 0;
+        data->tap_detector.max_movement = 0;
+        data->tap_detector.tap_pending = false;
+        
+        // Initialize tap release work
+        k_work_init_delayable(&data->tap_release_work, pinnacle_tap_release_work_handler);
+        
+        LOG_INF("Tap detection enabled: tap_timeout=%dms, movement_threshold=%d",
+                config->tap_timeout_ms, config->tap_movement_threshold);
+    }
     k_msleep(10);
     ret = pinnacle_write(dev, PINNACLE_STATUS1, 0); // Clear CC
     if (ret < 0) {
@@ -783,13 +874,6 @@ static int pinnacle_init(const struct device *dev) {
     }
 
     uint8_t feed_cfg2 = PINNACLE_FEED_CFG2_EN_IM | PINNACLE_FEED_CFG2_EN_BTN_SCRL;
-    if (config->no_taps) {
-        feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_TAP;
-    }
-
-    if (config->no_secondary_tap) {
-        feed_cfg2 |= PINNACLE_FEED_CFG2_DIS_SEC;
-    }
 
     if (config->rotate_90) {
         feed_cfg2 |= PINNACLE_FEED_CFG2_ROTATE_90;
@@ -867,8 +951,6 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .x_invert = DT_INST_PROP(n, x_invert),                                                     \
         .y_invert = DT_INST_PROP(n, y_invert),                                                     \
         .sleep_en = DT_INST_PROP(n, sleep),                                                        \
-        .no_taps = DT_INST_PROP(n, no_taps),                                                       \
-        .no_secondary_tap = DT_INST_PROP(n, no_secondary_tap),                                     \
         .z_touch_detection = DT_INST_PROP_OR(n, z_touch_detection, false),                         \
         .x_axis_z_min = DT_INST_PROP_OR(n, x_axis_z_min, 5),                                       \
         .y_axis_z_min = DT_INST_PROP_OR(n, y_axis_z_min, 4),                                       \
@@ -881,6 +963,9 @@ static int pinnacle_pm_action(const struct device *dev, enum pm_device_action ac
         .inertia_stop_velocity = DT_INST_PROP_OR(n, inertia_stop_velocity, 5),                     \
         .inertia_decay_rate = DT_INST_PROP_OR(n, inertia_decay_rate, 950),                         \
         .inertia_update_interval_ms = DT_INST_PROP_OR(n, inertia_update_interval_ms, 16),          \
+        .no_taps = DT_INST_PROP(n, no_taps),                                       \
+        .tap_timeout_ms = DT_INST_PROP_OR(n, tap_timeout_ms, 200),                                 \
+        .tap_movement_threshold = DT_INST_PROP_OR(n, tap_movement_threshold, 15),                  \
     };                                                                                             \
     PM_DEVICE_DT_INST_DEFINE(n, pinnacle_pm_action);                                               \
     DEVICE_DT_INST_DEFINE(n, pinnacle_init, PM_DEVICE_DT_INST_GET(n), &pinnacle_data_##n,          \

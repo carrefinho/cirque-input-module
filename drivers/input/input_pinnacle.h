@@ -79,8 +79,20 @@ struct pinnacle_inertia_axis {
     int32_t remainder_x1000;    // Sub-pixel remainder for smooth movement
 };
 
+enum pinnacle_tap_state {
+    TAP_IDLE,           // No touch detected
+    TAP_DOWN            // Touch down, checking for tap
+};
+
+struct pinnacle_tap_detector {
+    enum pinnacle_tap_state state;
+    int64_t touch_start_time;   // When current touch started
+    uint16_t initial_x, initial_y;  // Position where touch started
+    uint16_t max_movement;      // Maximum movement during current touch
+    bool tap_pending;           // Tap event ready to be sent
+};
+
 struct pinnacle_data {
-    uint8_t btn_cache;
     bool in_int;
     bool touch_active;
     uint16_t last_x, last_y;  // Previous absolute position for delta calculation
@@ -92,6 +104,9 @@ struct pinnacle_data {
     struct pinnacle_inertia_axis inertia_x, inertia_y;
     struct k_work_delayable inertia_work;
     struct k_mutex inertia_lock;
+    // Tap detection state
+    struct pinnacle_tap_detector tap_detector;
+    struct k_work_delayable tap_release_work;  // For delayed button release
 };
 
 enum pinnacle_sensitivity {
@@ -114,7 +129,7 @@ struct pinnacle_config {
     pinnacle_seq_read_t seq_read;
     pinnacle_write_t write;
 
-    bool rotate_90, sleep_en, no_taps, no_secondary_tap, x_invert, y_invert, z_touch_detection;
+    bool rotate_90, sleep_en, x_invert, y_invert, z_touch_detection;
     enum pinnacle_sensitivity sensitivity;
     uint8_t x_axis_z_min, y_axis_z_min;
     uint8_t z_threshold_touch, z_threshold_release;
@@ -125,6 +140,10 @@ struct pinnacle_config {
     uint16_t inertia_stop_velocity;
     uint16_t inertia_decay_rate;
     uint16_t inertia_update_interval_ms;
+    // Tap detection configuration
+    bool no_taps;
+    uint16_t tap_timeout_ms;                // Maximum tap duration
+    uint16_t tap_movement_threshold;        // Maximum movement for valid tap
 };
 
 int pinnacle_set_sleep(const struct device *dev, bool enabled);
